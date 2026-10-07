@@ -221,6 +221,14 @@ input {
   margin: 7px 12px 0;
 }
 
+.freeze-error {
+  margin: 7px 12px 0;
+}
+
+.inspector-frozen {
+  margin-top: 13px;
+}
+
 .studio-workspace {
   display: grid;
   min-width: 0;
@@ -562,6 +570,28 @@ input {
 .audio-clip--selected {
   z-index: 4;
   box-shadow: 0 0 0 2px #1769ff, 0 5px 12px rgba(23, 105, 255, .18);
+}
+
+.audio-clip--frozen {
+  border-style: dashed;
+  opacity: .92;
+}
+
+.audio-clip--frozen .clip-title {
+  background: rgba(224, 234, 255, .78);
+}
+
+.clip-frozen-badge {
+  height: 16px;
+  margin-left: auto;
+  border-color: #90b5ff !important;
+  background: #eef4ff !important;
+  color: #1769ff !important;
+  font-size: 9px !important;
+}
+
+.clip-frozen-badge .MuiChip-icon {
+  font-size: 11px;
 }
 
 .clip-title {

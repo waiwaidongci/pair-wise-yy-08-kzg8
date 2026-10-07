@@ -8,6 +8,13 @@ import type {
   ClipEffect,
   TrackColor,
 } from '../types/audio';
+import {
+  ASSET_LIBRARY_CAPACITY,
+  encodeWavDataUrl,
+  estimateBounceBytes,
+  projectAssetUsage,
+  renderTrackBounce,
+} from '../utils/freezeTrack';
 import { SYNTHETIC_ASSETS } from '../utils/syntheticAudio';
 
 const TRACK_COLORS: TrackColor[] = ['#2563eb', '#0f9f7a', '#d97706', '#c2413b', '#7c3aed', '#0891b2'];
@@ -135,6 +142,8 @@ interface StudioState {
   moveClipToTrack: (fromTrackId: string, clipId: string, toTrackId: string, start: number) => void;
   duplicateClip: (trackId: string, clipId: string) => void;
   deleteClip: (trackId: string, clipId: string) => void;
+  freezeTrack: (trackId: string) => Promise<void>;
+  unfreezeTrack: (trackId: string) => void;
   selectClip: (clipId: string | null) => void;
   updateTransport: (patch: Partial<Pick<AudioProject, 'bpm' | 'snap' | 'loopEnabled' | 'loopStart' | 'loopEnd' | 'pixelsPerSecond'>>) => void;
   importFile: (file: File) => Promise<void>;
@@ -154,6 +163,10 @@ function normalizeProject(project: AudioProject): AudioProject {
       ...track,
       volume: Math.max(0, Math.min(1, track.volume)),
       pan: Math.max(-1, Math.min(1, track.pan)),
+      // 兼容旧数据：补齐冻结相关字段。
+      frozen: track.frozen ?? false,
+      frozenAssetId: track.frozenAssetId,
+      savedClips: track.savedClips,
       clips: track.clips.map((clip) => ({
         ...clip,
         duration: Math.max(0.02, clip.duration),
@@ -267,15 +280,30 @@ export const useStudioStore = create<StudioState>()(
       deleteTrack: (trackId) =>
         set((state) => {
           if (state.project.tracks.length <= 1) return {};
+          const removed = state.project.tracks.find((track) => track.id === trackId);
           const tracks = state.project.tracks.filter((track) => track.id !== trackId);
+          // 删除冻结轨时回收其渲染素材（无其他轨道引用时），避免容量被孤儿素材占用。
+          const removedAssetId = removed?.frozenAssetId;
+          const stillReferenced = removedAssetId
+            ? tracks.some(
+                (track) =>
+                  track.frozenAssetId === removedAssetId ||
+                  track.clips.some((clip) => clip.assetId === removedAssetId),
+              )
+            : true;
+          const assets =
+            removedAssetId && !stillReferenced
+              ? state.project.assets.filter((asset) => asset.id !== removedAssetId)
+              : state.project.assets;
           return {
             selectedTrackId: tracks[0].id,
             selectedClipId: null,
-            project: timestamp({ ...state.project, tracks }),
+            project: timestamp({ ...state.project, tracks, assets }),
           };
         }),
       addClip: (trackId, assetId, start) =>
         set((state) => {
+          if (state.project.tracks.find((track) => track.id === trackId)?.frozen) return {};
           const asset = state.project.assets.find((item) => item.id === assetId);
           if (!asset) return {};
           const next = addAssetClip(state.project, trackId, asset, start ?? state.playhead);
@@ -284,21 +312,24 @@ export const useStudioStore = create<StudioState>()(
           return { project: next, selectedTrackId: trackId, selectedClipId: clip?.id ?? null };
         }),
       setClip: (trackId, clipId, patch) =>
-        set((state) => ({
-          project: timestamp({
-            ...state.project,
-            tracks: state.project.tracks.map((track) =>
-              track.id === trackId
-                ? {
-                    ...track,
-                    clips: track.clips.map((clip) =>
-                      clip.id === clipId ? { ...clip, ...patch } : clip,
-                    ),
-                  }
-                : track,
-            ),
-          }),
-        })),
+        set((state) => {
+          if (state.project.tracks.find((track) => track.id === trackId)?.frozen) return {};
+          return {
+            project: timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((track) =>
+                track.id === trackId
+                  ? {
+                      ...track,
+                      clips: track.clips.map((clip) =>
+                        clip.id === clipId ? { ...clip, ...patch } : clip,
+                      ),
+                    }
+                  : track,
+              ),
+            }),
+          };
+        }),
       setClipEffect: (trackId, clipId, effect, amount) =>
         get().setClip(trackId, clipId, {
           effect,
@@ -306,8 +337,10 @@ export const useStudioStore = create<StudioState>()(
         }),
       moveClipToTrack: (fromTrackId, clipId, toTrackId, start) =>
         set((state) => {
-          const sourceTrack = state.project.tracks.find((track) => track.id === fromTrackId);
-          const clip = sourceTrack?.clips.find((item) => item.id === clipId);
+          const fromTrack = state.project.tracks.find((track) => track.id === fromTrackId);
+          const toTrack = state.project.tracks.find((track) => track.id === toTrackId);
+          if (fromTrack?.frozen || toTrack?.frozen) return {};
+          const clip = fromTrack?.clips.find((item) => item.id === clipId);
           if (!clip) return {};
           const moved = { ...clip, start: Math.max(0, start) };
           return {
@@ -336,8 +369,9 @@ export const useStudioStore = create<StudioState>()(
       duplicateClip: (trackId, clipId) =>
         set((state) => {
           const track = state.project.tracks.find((item) => item.id === trackId);
+          if (!track || track.frozen) return {};
           const clip = track?.clips.find((item) => item.id === clipId);
-          if (!track || !clip) return {};
+          if (!clip) return {};
           const copy = {
             ...clip,
             id: uid('clip'),
@@ -355,17 +389,116 @@ export const useStudioStore = create<StudioState>()(
           };
         }),
       deleteClip: (trackId, clipId) =>
-        set((state) => ({
-          selectedClipId: null,
-          project: timestamp({
-            ...state.project,
-            tracks: state.project.tracks.map((track) =>
-              track.id === trackId
-                ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) }
-                : track,
-            ),
-          }),
-        })),
+        set((state) => {
+          if (state.project.tracks.find((track) => track.id === trackId)?.frozen) return {};
+          return {
+            selectedClipId: null,
+            project: timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((track) =>
+                track.id === trackId
+                  ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) }
+                  : track,
+              ),
+            }),
+          };
+        }),
+      freezeTrack: async (trackId) => {
+        const state = get();
+        const track = state.project.tracks.find((item) => item.id === trackId);
+        if (!track || track.frozen) return;
+        if (track.clips.length === 0) {
+          throw new Error('轨道没有片段，无需冻结');
+        }
+        const contentEnd = Math.max(...track.clips.map((clip) => clip.start + clip.duration));
+        const currentUsage = projectAssetUsage(state.project);
+        // 渲染前容量预判：超出上限直接拒绝，不产生任何中间结果。
+        if (currentUsage + estimateBounceBytes(contentEnd) > ASSET_LIBRARY_CAPACITY) {
+          throw new Error('冻结结果将超过素材库容量（48MB），请先删除部分素材或缩短轨道');
+        }
+        // 离线渲染与编码在提交前完成；任何一步失败都不会改动原轨。
+        const buffer = await renderTrackBounce(state.project, track);
+        const dataUrl = await encodeWavDataUrl(buffer);
+        if (currentUsage + dataUrl.length > ASSET_LIBRARY_CAPACITY) {
+          throw new Error('冻结结果将超过素材库容量（48MB），请先删除部分素材或缩短轨道');
+        }
+        const asset: AudioAsset = {
+          id: uid('asset'),
+          name: `${track.name} 冻结`,
+          source: 'frozen',
+          duration: buffer.duration,
+          mimeType: 'audio/wav',
+          dataUrl,
+          size: dataUrl.length,
+        };
+        const frozenClip: AudioClip = {
+          id: uid('clip'),
+          assetId: asset.id,
+          name: `${track.name} 冻结音频`,
+          start: 0,
+          duration: buffer.duration,
+          offset: 0,
+          fadeIn: 0,
+          fadeOut: 0,
+          effect: 'none',
+          effectAmount: 0,
+          frozen: true,
+        };
+        set((current) => {
+          const target = current.project.tracks.find((item) => item.id === trackId);
+          if (!target || target.frozen) return {};
+          return {
+            project: timestamp({
+              ...current.project,
+              assets: [...current.project.assets, asset],
+              tracks: current.project.tracks.map((item) =>
+                item.id === trackId
+                  ? {
+                      ...item,
+                      frozen: true,
+                      frozenAssetId: asset.id,
+                      savedClips: item.clips.map((clip) => ({ ...clip })),
+                      clips: [frozenClip],
+                    }
+                  : item,
+              ),
+            }),
+          };
+        });
+      },
+      unfreezeTrack: (trackId) =>
+        set((state) => {
+          const track = state.project.tracks.find((item) => item.id === trackId);
+          if (!track || !track.frozen) return {};
+          const frozenAssetId = track.frozenAssetId;
+          // 仅当没有其他轨道引用该冻结素材时才回收，避免误删。
+          const stillReferenced = state.project.tracks.some(
+            (item) =>
+              item.id !== trackId &&
+              (item.frozenAssetId === frozenAssetId ||
+                item.clips.some((clip) => clip.assetId === frozenAssetId)),
+          );
+          return {
+            selectedClipId: null,
+            project: timestamp({
+              ...state.project,
+              assets: stillReferenced
+                ? state.project.assets
+                : state.project.assets.filter((asset) => asset.id !== frozenAssetId),
+              tracks: state.project.tracks.map((item) =>
+                item.id === trackId
+                  ? {
+                      ...item,
+                      frozen: false,
+                      frozenAssetId: undefined,
+                      savedClips: undefined,
+                      clips: (item.savedClips ?? item.clips).map((clip) => ({ ...clip })),
+                    }
+                  : item,
+              ),
+            }),
+          };
+        }),
       selectClip: (selectedClipId) => set({ selectedClipId }),
       updateTransport: (patch) =>
         set((state) => ({

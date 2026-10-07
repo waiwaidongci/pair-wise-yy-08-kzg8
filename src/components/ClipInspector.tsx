@@ -2,9 +2,11 @@ import {
   ContentCopy,
   DeleteOutline,
   GraphicEq,
+  LockOpen,
   Tune,
 } from '@mui/icons-material';
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -28,6 +30,7 @@ export function ClipInspector() {
   const setClipEffect = useStudioStore((state) => state.setClipEffect);
   const duplicateClip = useStudioStore((state) => state.duplicateClip);
   const deleteClip = useStudioStore((state) => state.deleteClip);
+  const unfreezeTrack = useStudioStore((state) => state.unfreezeTrack);
 
   const selection = useMemo(() => {
     for (const track of project.tracks) {
@@ -54,8 +57,10 @@ export function ClipInspector() {
 
   const { track, clip } = selection;
   const asset = project.assets.find((item) => item.id === clip.assetId);
+  const frozen = track.frozen || clip.frozen;
 
   const update = (patch: Parameters<typeof setClip>[2]) => {
+    if (frozen) return;
     setClip(track.id, clip.id, patch);
   };
 
@@ -81,6 +86,25 @@ export function ClipInspector() {
         </div>
       </Box>
 
+      {frozen && (
+        <Alert
+          severity="info"
+          className="inspector-frozen"
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              startIcon={<LockOpen />}
+              onClick={() => unfreezeTrack(track.id)}
+            >
+              解冻
+            </Button>
+          }
+        >
+          轨道已冻结，片段与参数为只读。解冻后可恢复编辑。
+        </Alert>
+      )}
+
       <div className="inspector-section">
         <Typography className="section-label" variant="caption">时间位置</Typography>
         <Stack spacing={1.4}>
@@ -92,6 +116,7 @@ export function ClipInspector() {
               max={30}
               step={project.snap}
               value={clip.start}
+              disabled={frozen}
               onChange={(_, value) => update({ start: Math.max(0, Number(value)) })}
             />
           </label>
@@ -103,6 +128,7 @@ export function ClipInspector() {
               max={asset?.duration ?? 12}
               step={project.snap}
               value={clip.duration}
+              disabled={frozen}
               onChange={(_, value) => update({ duration: Number(value) })}
             />
           </label>
@@ -114,6 +140,7 @@ export function ClipInspector() {
               max={Math.max(0, (asset?.duration ?? clip.duration) - clip.duration)}
               step={0.01}
               value={clip.offset}
+              disabled={frozen}
               onChange={(_, value) => update({ offset: Number(value) })}
             />
           </label>
@@ -132,6 +159,7 @@ export function ClipInspector() {
               max={Math.min(3, clip.duration / 2)}
               step={0.01}
               value={clip.fadeIn}
+              disabled={frozen}
               onChange={(_, value) => update({ fadeIn: Number(value) })}
             />
           </label>
@@ -143,6 +171,7 @@ export function ClipInspector() {
               max={Math.min(3, clip.duration / 2)}
               step={0.01}
               value={clip.fadeOut}
+              disabled={frozen}
               onChange={(_, value) => update({ fadeOut: Number(value) })}
             />
           </label>
@@ -160,6 +189,7 @@ export function ClipInspector() {
           <Select
             label="效果类型"
             value={clip.effect}
+            disabled={frozen}
             onChange={(event) =>
               setClipEffect(track.id, clip.id, event.target.value as ClipEffect, clip.effectAmount || 35)
             }
@@ -177,7 +207,7 @@ export function ClipInspector() {
             min={0}
             max={100}
             value={clip.effectAmount}
-            disabled={clip.effect === 'none'}
+            disabled={frozen || clip.effect === 'none'}
             onChange={(_, value) =>
               setClipEffect(track.id, clip.id, clip.effect, Number(value))
             }
@@ -186,25 +216,27 @@ export function ClipInspector() {
       </div>
 
       <Divider />
-      <Stack direction="row" spacing={1} className="inspector-actions">
-        <Button
-          fullWidth
-          variant="outlined"
-          startIcon={<ContentCopy />}
-          onClick={() => duplicateClip(track.id, clip.id)}
-        >
-          复制片段
-        </Button>
-        <Button
-          fullWidth
-          color="error"
-          variant="outlined"
-          startIcon={<DeleteOutline />}
-          onClick={() => deleteClip(track.id, clip.id)}
-        >
-          删除
-        </Button>
-      </Stack>
+      {!frozen && (
+        <Stack direction="row" spacing={1} className="inspector-actions">
+          <Button
+            fullWidth
+            variant="outlined"
+            startIcon={<ContentCopy />}
+            onClick={() => duplicateClip(track.id, clip.id)}
+          >
+            复制片段
+          </Button>
+          <Button
+            fullWidth
+            color="error"
+            variant="outlined"
+            startIcon={<DeleteOutline />}
+            onClick={() => deleteClip(track.id, clip.id)}
+          >
+            删除
+          </Button>
+        </Stack>
+      )}
     </aside>
   );
 }

@@ -1,21 +1,25 @@
 import {
+  AcUnit,
   ContentCopy,
   DeleteOutline,
   GraphicEq,
   Lock,
+  LockOpen,
   VolumeOff,
   VolumeUp,
 } from '@mui/icons-material';
 import {
+  Alert,
   Box,
   Chip,
+  CircularProgress,
   IconButton,
   Slider,
   Stack,
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useStudioStore } from '../stores/studioStore';
 import type { AudioClip, AudioTrack } from '../types/audio';
 import { WaveformClip } from './WaveformClip';
@@ -45,6 +49,10 @@ export function TrackTimeline() {
   const selectClip = useStudioStore((state) => state.selectClip);
   const deleteClip = useStudioStore((state) => state.deleteClip);
   const duplicateClip = useStudioStore((state) => state.duplicateClip);
+  const freezeTrack = useStudioStore((state) => state.freezeTrack);
+  const unfreezeTrack = useStudioStore((state) => state.unfreezeTrack);
+  const [freezeError, setFreezeError] = useState<string | null>(null);
+  const [freezingId, setFreezingId] = useState<string | null>(null);
   const dragState = useRef<DragState | null>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -88,6 +96,7 @@ export function TrackTimeline() {
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    if (track.frozen) return; // 冻结轨道只读，禁止拖动与裁剪。
     selectClip(clip.id);
     dragState.current = {
       mode,
@@ -146,8 +155,33 @@ export function TrackTimeline() {
     setPlayhead(Math.min(timelineDuration, time));
   };
 
+  const handleFreeze = async (track: AudioTrack) => {
+    if (track.frozen) {
+      unfreezeTrack(track.id);
+      return;
+    }
+    setFreezeError(null);
+    setFreezingId(track.id);
+    try {
+      await freezeTrack(track.id);
+    } catch (error) {
+      setFreezeError(error instanceof Error ? error.message : '冻结失败');
+    } finally {
+      setFreezingId(null);
+    }
+  };
+
   return (
     <section className="timeline-panel">
+      {freezeError && (
+        <Alert
+          severity="warning"
+          className="freeze-error"
+          onClose={() => setFreezeError(null)}
+        >
+          {freezeError}
+        </Alert>
+      )}
       <div className="timeline-scroll" ref={scrollRef}>
         <div className="timeline-content" style={{ width: `${180 + timelineDuration * pps}px` }}>
           <div className="timeline-ruler-row">
@@ -221,6 +255,30 @@ export function TrackTimeline() {
                     >
                       S
                     </button>
+                    <Tooltip
+                      title={
+                        track.frozen
+                          ? '解冻轨道（恢复原片段与参数）'
+                          : '冻结轨道（渲染音量、声像、淡入淡出与效果为一段音频，只读）'
+                      }
+                    >
+                      <span>
+                        <IconButton
+                          size="small"
+                          color={track.frozen ? 'info' : 'default'}
+                          disabled={freezingId === track.id}
+                          onClick={() => void handleFreeze(track)}
+                        >
+                          {freezingId === track.id ? (
+                            <CircularProgress size={14} />
+                          ) : track.frozen ? (
+                            <LockOpen fontSize="small" />
+                          ) : (
+                            <AcUnit fontSize="small" />
+                          )}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   </div>
                   <div className="track-mix-row">
                     <span>音量</span>
@@ -242,6 +300,7 @@ export function TrackTimeline() {
                       max={1}
                       step={0.01}
                       value={track.pan}
+                      disabled={track.frozen}
                       onChange={(_, value) => updateTrack(track.id, { pan: Number(value) })}
                     />
                     <span>{track.pan === 0 ? 'C' : track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`}</span>
@@ -265,16 +324,18 @@ export function TrackTimeline() {
                   {track.clips.map((clip) => {
                     const asset = project.assets.find((item) => item.id === clip.assetId);
                     const selected = selectedClipId === clip.id;
+                    const frozen = track.frozen || clip.frozen;
                     return (
                       <Box
                         key={clip.id}
-                        className={`audio-clip ${selected ? 'audio-clip--selected' : ''}`}
+                        className={`audio-clip ${selected ? 'audio-clip--selected' : ''} ${frozen ? 'audio-clip--frozen' : ''}`}
                         style={{
                           left: `${clip.start * pps}px`,
                           width: `${Math.max(20, clip.duration * pps)}px`,
                           top: `${(track.height - 82) / 2}px`,
                           background: `${track.color}22`,
                           borderColor: selected ? track.color : `${track.color}99`,
+                          cursor: frozen ? 'default' : 'grab',
                         }}
                         onPointerDown={(event) => startDrag(event, track, clip, 'move')}
                       >
@@ -282,6 +343,14 @@ export function TrackTimeline() {
                           <GraphicEq fontSize="inherit" />
                           <span>{clip.name}</span>
                           <small>{clip.duration.toFixed(2)}s</small>
+                          {frozen && (
+                            <Chip
+                              size="small"
+                              icon={<Lock fontSize="inherit" />}
+                              label="冻结"
+                              className="clip-frozen-badge"
+                            />
+                          )}
                         </div>
                         {asset && (
                           <WaveformClip
@@ -291,17 +360,21 @@ export function TrackTimeline() {
                             color={track.color}
                           />
                         )}
-                        <span
-                          className="trim-handle trim-handle--left"
-                          title="裁剪片段左边缘"
-                          onPointerDown={(event) => startDrag(event, track, clip, 'trim-left')}
-                        />
-                        <span
-                          className="trim-handle trim-handle--right"
-                          title="裁剪片段右边缘"
-                          onPointerDown={(event) => startDrag(event, track, clip, 'trim-right')}
-                        />
-                        {selected && (
+                        {!frozen && (
+                          <>
+                            <span
+                              className="trim-handle trim-handle--left"
+                              title="裁剪片段左边缘"
+                              onPointerDown={(event) => startDrag(event, track, clip, 'trim-left')}
+                            />
+                            <span
+                              className="trim-handle trim-handle--right"
+                              title="裁剪片段右边缘"
+                              onPointerDown={(event) => startDrag(event, track, clip, 'trim-right')}
+                            />
+                          </>
+                        )}
+                        {selected && !frozen && (
                           <span className="clip-actions" onPointerDown={(event) => event.stopPropagation()}>
                             <IconButton
                               size="small"

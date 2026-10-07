@@ -1,4 +1,5 @@
 import {
+  AcUnit,
   AudioFile,
   FiberManualRecord,
   FolderOpen,
@@ -178,11 +179,17 @@ export function AssetLibrary() {
               }
             >
               <ListItemIcon>
-                {asset.source === 'recorded' ? <Mic color="error" /> : <AudioFile color="success" />}
+                {asset.source === 'recorded' ? (
+                  <Mic color="error" />
+                ) : asset.source === 'frozen' ? (
+                  <AcUnit color="info" />
+                ) : (
+                  <AudioFile color="success" />
+                )}
               </ListItemIcon>
               <ListItemText
                 primary={asset.name}
-                secondary={`${asset.duration.toFixed(1)}s · ${asset.source === 'recorded' ? '浏览器录音' : '本地导入'}`}
+                secondary={`${asset.duration.toFixed(1)}s · ${asset.source === 'recorded' ? '浏览器录音' : asset.source === 'frozen' ? '冻结渲染' : '本地导入'}`}
               />
             </ListItem>
           ))}

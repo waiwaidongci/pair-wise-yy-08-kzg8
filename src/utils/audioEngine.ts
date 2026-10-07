@@ -1,4 +1,5 @@
-import type { AudioAsset, AudioProject, AudioTrack } from '../types/audio';
+import type { AudioAsset, AudioProject } from '../types/audio';
+import { applyClipEnvelope, buildClipGraph } from './clipGraph';
 import { createSyntheticBuffer, isSyntheticAsset } from './syntheticAudio';
 
 export class AudioEngine {
@@ -58,7 +59,7 @@ export class AudioEngine {
         const buffer = await this.getBuffer(asset);
         const source = context.createBufferSource();
         source.buffer = buffer;
-        const graph = this.createClipGraph(context, track, clip);
+        const graph = buildClipGraph(context, track, clip);
         source.connect(graph.input);
         graph.output.connect(this.master as GainNode);
         const startsIn = Math.max(0, clip.start - from);
@@ -67,7 +68,7 @@ export class AudioEngine {
         const duration = Math.max(0, Math.min(clip.duration - Math.max(0, from - clip.start), available));
         if (duration <= 0.005) continue;
         const when = scheduleStart + startsIn;
-        this.applyEnvelope(context, graph.gain, when, duration, clip.fadeIn, clip.fadeOut, track.volume);
+        applyClipEnvelope(context, graph.output, when, duration, clip.fadeIn, clip.fadeOut, track.volume);
         source.start(when, offset, duration);
         this.sources.push(source);
         timelineEnd = Math.max(timelineEnd, clipEnd);
@@ -97,70 +98,6 @@ export class AudioEngine {
   getPlayhead(): number {
     if (!this.context || !this.master) return this.playFrom;
     return this.playFrom + Math.max(0, this.context.currentTime - this.playStartedAt);
-  }
-
-  private createClipGraph(
-    context: AudioContext,
-    track: AudioTrack,
-    clip: AudioProject['tracks'][number]['clips'][number],
-  ): { input: AudioNode; output: AudioNode; gain: GainNode } {
-    const panner = context.createStereoPanner();
-    panner.pan.value = track.pan;
-    const gain = context.createGain();
-    gain.gain.value = 0;
-    let input: AudioNode = panner;
-    if (clip.effect === 'lowpass') {
-      input = context.createGain();
-      const filter = context.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = Math.max(220, 12000 - clip.effectAmount * 110);
-      filter.Q.value = 0.8;
-      input.connect(filter);
-      filter.connect(panner);
-    } else if (clip.effect === 'highpass') {
-      input = context.createGain();
-      const filter = context.createBiquadFilter();
-      filter.type = 'highpass';
-      filter.frequency.value = 80 + clip.effectAmount * 12;
-      filter.Q.value = 0.9;
-      input.connect(filter);
-      filter.connect(panner);
-    } else if (clip.effect === 'echo') {
-      input = context.createGain();
-      const delay = context.createDelay(1.2);
-      delay.delayTime.value = 0.18 + (clip.effectAmount / 100) * 0.34;
-      const feedback = context.createGain();
-      feedback.gain.value = Math.min(0.62, clip.effectAmount / 130);
-      const wet = context.createGain();
-      wet.gain.value = Math.min(0.72, 0.18 + clip.effectAmount / 160);
-      input.connect(delay);
-      delay.connect(feedback);
-      feedback.connect(delay);
-      delay.connect(wet);
-      wet.connect(panner);
-    }
-    panner.connect(gain);
-    return { input, output: gain, gain };
-  }
-
-  private applyEnvelope(
-    context: AudioContext,
-    gain: GainNode,
-    when: number,
-    duration: number,
-    fadeIn: number,
-    fadeOut: number,
-    volume: number,
-  ): void {
-    const safeIn = Math.min(fadeIn, duration * 0.45);
-    const safeOut = Math.min(fadeOut, duration * 0.45);
-    const peak = Math.max(0.001, volume);
-    gain.gain.cancelScheduledValues(when);
-    gain.gain.setValueAtTime(0, when);
-    gain.gain.linearRampToValueAtTime(peak, when + safeIn);
-    gain.gain.setValueAtTime(peak, Math.max(when + safeIn, when + duration - safeOut));
-    gain.gain.linearRampToValueAtTime(0, when + duration);
-    context.resume().catch(() => undefined);
   }
 }
 
