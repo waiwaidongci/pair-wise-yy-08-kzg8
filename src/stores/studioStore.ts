@@ -6,9 +6,17 @@ import type {
   AudioProject,
   AudioTrack,
   ClipEffect,
+  FrozenTrackState,
   TrackColor,
 } from '../types/audio';
+import { audioEngine } from '../utils/audioEngine';
 import { SYNTHETIC_ASSETS } from '../utils/syntheticAudio';
+import {
+  assertFreezeCapacity,
+  estimateRenderBytes,
+  measureFreezeRange,
+  renderTrackToAudio,
+} from '../utils/trackFreeze';
 
 const TRACK_COLORS: TrackColor[] = ['#2563eb', '#0f9f7a', '#d97706', '#c2413b', '#7c3aed', '#0891b2'];
 
@@ -35,6 +43,7 @@ function initialProject(): AudioProject {
       muted: false,
       solo: false,
       height: 112,
+      frozen: null,
       clips: [
         {
           id: 'clip-drums-a',
@@ -59,6 +68,7 @@ function initialProject(): AudioProject {
       muted: false,
       solo: false,
       height: 112,
+      frozen: null,
       clips: [
         {
           id: 'clip-chords-a',
@@ -83,6 +93,7 @@ function initialProject(): AudioProject {
       muted: false,
       solo: false,
       height: 112,
+      frozen: null,
       clips: [
         {
           id: 'clip-bass-a',
@@ -135,12 +146,43 @@ interface StudioState {
   moveClipToTrack: (fromTrackId: string, clipId: string, toTrackId: string, start: number) => void;
   duplicateClip: (trackId: string, clipId: string) => void;
   deleteClip: (trackId: string, clipId: string) => void;
+  freezeTrack: (trackId: string) => Promise<void>;
+  unfreezeTrack: (trackId: string) => void;
   selectClip: (clipId: string | null) => void;
   updateTransport: (patch: Partial<Pick<AudioProject, 'bpm' | 'snap' | 'loopEnabled' | 'loopStart' | 'loopEnd' | 'pixelsPerSecond'>>) => void;
   importFile: (file: File) => Promise<void>;
   addRecordedBlob: (blob: Blob, duration: number) => Promise<void>;
   replaceProject: (project: AudioProject) => void;
   markSaved: () => void;
+}
+
+function normalizeClip(clip: AudioClip): AudioClip {
+  return {
+    ...clip,
+    duration: Math.max(0.02, clip.duration),
+    offset: Math.max(0, clip.offset),
+    fadeIn: Math.max(0, clip.fadeIn),
+    fadeOut: Math.max(0, clip.fadeOut),
+    effectAmount: Math.max(0, Math.min(100, clip.effectAmount)),
+  };
+}
+
+/** 兼容旧数据：缺少冻结信息或结构不完整时按 null / 默认值补齐。 */
+function normalizeFrozen(frozen: AudioTrack['frozen']): FrozenTrackState | null {
+  if (!frozen || typeof frozen !== 'object') return null;
+  const { assetId, renderedAt, start, duration, source } = frozen;
+  if (!assetId || !source || !Array.isArray(source.clips)) return null;
+  return {
+    assetId,
+    renderedAt: typeof renderedAt === 'number' ? renderedAt : Date.now(),
+    start: Math.max(0, typeof start === 'number' ? start : 0),
+    duration: Math.max(0.02, typeof duration === 'number' ? duration : 0.02),
+    source: {
+      clips: source.clips.map((clip) => normalizeClip(clip)),
+      volume: Math.max(0, Math.min(1, typeof source.volume === 'number' ? source.volume : 1)),
+      pan: Math.max(-1, Math.min(1, typeof source.pan === 'number' ? source.pan : 0)),
+    },
+  };
 }
 
 function normalizeProject(project: AudioProject): AudioProject {
@@ -154,14 +196,8 @@ function normalizeProject(project: AudioProject): AudioProject {
       ...track,
       volume: Math.max(0, Math.min(1, track.volume)),
       pan: Math.max(-1, Math.min(1, track.pan)),
-      clips: track.clips.map((clip) => ({
-        ...clip,
-        duration: Math.max(0.02, clip.duration),
-        offset: Math.max(0, clip.offset),
-        fadeIn: Math.max(0, clip.fadeIn),
-        fadeOut: Math.max(0, clip.fadeOut),
-        effectAmount: Math.max(0, Math.min(100, clip.effectAmount)),
-      })),
+      frozen: normalizeFrozen(track.frozen),
+      clips: track.clips.map((clip) => normalizeClip(clip)),
     })),
     assets: [...builtinAssets, ...customAssets],
   };
@@ -169,6 +205,31 @@ function normalizeProject(project: AudioProject): AudioProject {
 
 function timestamp(project: AudioProject): AudioProject {
   return { ...project, updatedAt: Date.now() };
+}
+
+/** 冻结轨道仍可调整的字段，其余一律视为只读。 */
+const FROZEN_EDITABLE_KEYS = ['muted', 'solo', 'volume', 'name', 'height'] as const;
+
+function findTrack(project: AudioProject, trackId: string): AudioTrack | undefined {
+  return project.tracks.find((track) => track.id === trackId);
+}
+
+/** 清理不再被任何片段（含冻结快照）引用的冻结渲染素材，释放素材库容量。 */
+function pruneOrphanedRenders(project: AudioProject): AudioProject {
+  const referenced = new Set<string>();
+  for (const track of project.tracks) {
+    for (const clip of track.clips) referenced.add(clip.assetId);
+    if (track.frozen) {
+      for (const clip of track.frozen.source.clips) referenced.add(clip.assetId);
+    }
+  }
+  const orphaned = project.assets.filter(
+    (asset) => asset.source === 'rendered' && !referenced.has(asset.id),
+  );
+  if (!orphaned.length) return project;
+  orphaned.forEach((asset) => audioEngine.releaseBuffer(asset.id));
+  const dropped = new Set(orphaned.map((asset) => asset.id));
+  return { ...project, assets: project.assets.filter((asset) => !dropped.has(asset.id)) };
 }
 
 async function readFileAsDataUrl(file: File | Blob): Promise<string> {
@@ -248,6 +309,7 @@ export const useStudioStore = create<StudioState>()(
             muted: false,
             solo: false,
             height: 112,
+            frozen: null,
             clips: [],
           };
           return {
@@ -256,26 +318,43 @@ export const useStudioStore = create<StudioState>()(
           };
         }),
       updateTrack: (trackId, patch) =>
-        set((state) => ({
-          project: timestamp({
-            ...state.project,
-            tracks: state.project.tracks.map((track) =>
-              track.id === trackId ? { ...track, ...patch } : track,
-            ),
-          }),
-        })),
+        set((state) => {
+          const track = findTrack(state.project, trackId);
+          if (!track) return {};
+          let nextPatch = patch;
+          if (track.frozen) {
+            // 冻结轨道只读：仅放行静音、独奏、音量和外观字段
+            nextPatch = {};
+            for (const key of FROZEN_EDITABLE_KEYS) {
+              if (key in patch) {
+                (nextPatch as Record<string, unknown>)[key] = patch[key];
+              }
+            }
+            if (!Object.keys(nextPatch).length) return {};
+          }
+          return {
+            project: timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((item) =>
+                item.id === trackId ? { ...item, ...nextPatch } : item,
+              ),
+            }),
+          };
+        }),
       deleteTrack: (trackId) =>
         set((state) => {
           if (state.project.tracks.length <= 1) return {};
           const tracks = state.project.tracks.filter((track) => track.id !== trackId);
+          const project = pruneOrphanedRenders(timestamp({ ...state.project, tracks }));
           return {
             selectedTrackId: tracks[0].id,
             selectedClipId: null,
-            project: timestamp({ ...state.project, tracks }),
+            project,
           };
         }),
       addClip: (trackId, assetId, start) =>
         set((state) => {
+          if (findTrack(state.project, trackId)?.frozen) return {};
           const asset = state.project.assets.find((item) => item.id === assetId);
           if (!asset) return {};
           const next = addAssetClip(state.project, trackId, asset, start ?? state.playhead);
@@ -284,21 +363,24 @@ export const useStudioStore = create<StudioState>()(
           return { project: next, selectedTrackId: trackId, selectedClipId: clip?.id ?? null };
         }),
       setClip: (trackId, clipId, patch) =>
-        set((state) => ({
-          project: timestamp({
-            ...state.project,
-            tracks: state.project.tracks.map((track) =>
-              track.id === trackId
-                ? {
-                    ...track,
-                    clips: track.clips.map((clip) =>
-                      clip.id === clipId ? { ...clip, ...patch } : clip,
-                    ),
-                  }
-                : track,
-            ),
-          }),
-        })),
+        set((state) => {
+          if (findTrack(state.project, trackId)?.frozen) return {};
+          return {
+            project: timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((track) =>
+                track.id === trackId
+                  ? {
+                      ...track,
+                      clips: track.clips.map((clip) =>
+                        clip.id === clipId ? { ...clip, ...patch } : clip,
+                      ),
+                    }
+                  : track,
+              ),
+            }),
+          };
+        }),
       setClipEffect: (trackId, clipId, effect, amount) =>
         get().setClip(trackId, clipId, {
           effect,
@@ -307,6 +389,8 @@ export const useStudioStore = create<StudioState>()(
       moveClipToTrack: (fromTrackId, clipId, toTrackId, start) =>
         set((state) => {
           const sourceTrack = state.project.tracks.find((track) => track.id === fromTrackId);
+          const targetTrack = state.project.tracks.find((track) => track.id === toTrackId);
+          if (sourceTrack?.frozen || targetTrack?.frozen) return {};
           const clip = sourceTrack?.clips.find((item) => item.id === clipId);
           if (!clip) return {};
           const moved = { ...clip, start: Math.max(0, start) };
@@ -336,6 +420,7 @@ export const useStudioStore = create<StudioState>()(
       duplicateClip: (trackId, clipId) =>
         set((state) => {
           const track = state.project.tracks.find((item) => item.id === trackId);
+          if (track?.frozen) return {};
           const clip = track?.clips.find((item) => item.id === clipId);
           if (!track || !clip) return {};
           const copy = {
@@ -355,17 +440,125 @@ export const useStudioStore = create<StudioState>()(
           };
         }),
       deleteClip: (trackId, clipId) =>
-        set((state) => ({
-          selectedClipId: null,
-          project: timestamp({
-            ...state.project,
-            tracks: state.project.tracks.map((track) =>
-              track.id === trackId
-                ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) }
-                : track,
-            ),
-          }),
-        })),
+        set((state) => {
+          if (findTrack(state.project, trackId)?.frozen) return {};
+          return {
+            selectedClipId: null,
+            project: timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((track) =>
+                track.id === trackId
+                  ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) }
+                  : track,
+              ),
+            }),
+          };
+        }),
+      freezeTrack: async (trackId) => {
+        const before = get().project;
+        const track = findTrack(before, trackId);
+        if (!track || track.frozen) return;
+        const range = measureFreezeRange(track);
+        if (!range) throw new Error('该轨道没有可冻结的片段');
+        try {
+          // 先按估算大小做容量预检，超限直接拒绝，不进入渲染
+          assertFreezeCapacity(before.assets, estimateRenderBytes(range.duration));
+          const render = await renderTrackToAudio(before, track);
+          // 渲染完成后按实际大小再校验一次，超限则放弃结果
+          assertFreezeCapacity(before.assets, render.size);
+          const asset: AudioAsset = {
+            id: uid('freeze'),
+            name: `${track.name} · 冻结渲染`,
+            source: 'rendered',
+            duration: render.duration,
+            mimeType: 'audio/wav',
+            dataUrl: render.dataUrl,
+            size: render.size,
+          };
+          const frozenClip: AudioClip = {
+            id: uid('clip'),
+            assetId: asset.id,
+            name: `${track.name} · 冻结`,
+            start: render.start,
+            duration: render.duration,
+            offset: 0,
+            fadeIn: 0,
+            fadeOut: 0,
+            effect: 'none',
+            effectAmount: 0,
+          };
+          const current = findTrack(get().project, trackId);
+          if (!current || current.frozen) return;
+          if (current !== track) {
+            throw new Error('冻结期间轨道被修改，请调整后重试');
+          }
+          const frozenTrack: AudioTrack = {
+            ...current,
+            // 音量与声像已渲染进音频，重置为直通值避免二次叠加；
+            // 原值保存在 frozen.source 中，解冻时还原
+            volume: 1,
+            pan: 0,
+            clips: [frozenClip],
+            frozen: {
+              assetId: asset.id,
+              renderedAt: Date.now(),
+              start: render.start,
+              duration: render.duration,
+              source: {
+                clips: current.clips.map((clip) => ({ ...clip })),
+                volume: current.volume,
+                pan: current.pan,
+              },
+            },
+          };
+          set((state) => ({
+            selectedClipId: frozenClip.id,
+            project: timestamp({
+              ...state.project,
+              assets: [...state.project.assets, asset],
+              tracks: state.project.tracks.map((item) =>
+                item.id === trackId ? frozenTrack : item,
+              ),
+            }),
+          }));
+        } catch (error) {
+          // 渲染或写入失败：恢复冻结前的工程，避免留下半段冻结结果
+          set({ project: before });
+          throw error instanceof Error ? error : new Error('冻结渲染失败，已保留原轨道');
+        }
+      },
+      unfreezeTrack: (trackId) =>
+        set((state) => {
+          const track = findTrack(state.project, trackId);
+          const frozen = track?.frozen;
+          if (!track || !frozen) return {};
+          const restored: AudioTrack = {
+            ...track,
+            volume: frozen.source.volume,
+            pan: frozen.source.pan,
+            clips: frozen.source.clips.map((clip) => ({ ...clip })),
+            frozen: null,
+          };
+          const project = pruneOrphanedRenders(
+            timestamp({
+              ...state.project,
+              tracks: state.project.tracks.map((item) =>
+                item.id === trackId ? restored : item,
+              ),
+            }),
+          );
+          const selectionAlive =
+            state.selectedClipId != null &&
+            project.tracks.some((item) =>
+              item.clips.some((clip) => clip.id === state.selectedClipId),
+            );
+          return {
+            project,
+            selectedClipId: selectionAlive
+              ? state.selectedClipId
+              : restored.clips[0]?.id ?? null,
+          };
+        }),
       selectClip: (selectedClipId) => set({ selectedClipId }),
       updateTransport: (patch) =>
         set((state) => ({
@@ -388,6 +581,9 @@ export const useStudioStore = create<StudioState>()(
         };
         set((state) => {
           const trackId = state.selectedTrackId || state.project.tracks[0].id;
+          if (findTrack(state.project, trackId)?.frozen) {
+            throw new Error('当前轨道已冻结，请先解冻或选择其他轨道');
+          }
           const project = addAssetClip(state.project, trackId, asset, state.playhead);
           const track = project.tracks.find((item) => item.id === trackId);
           return {
@@ -410,6 +606,9 @@ export const useStudioStore = create<StudioState>()(
         };
         set((state) => {
           const trackId = state.selectedTrackId || state.project.tracks[0].id;
+          if (findTrack(state.project, trackId)?.frozen) {
+            throw new Error('当前轨道已冻结，请先解冻或选择其他轨道');
+          }
           const project = addAssetClip(state.project, trackId, asset, state.playhead);
           const track = project.tracks.find((item) => item.id === trackId);
           return {

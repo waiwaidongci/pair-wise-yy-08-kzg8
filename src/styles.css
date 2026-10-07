@@ -348,6 +348,7 @@ input {
 
 .timeline-panel {
   display: grid;
+  position: relative;
   min-width: 0;
   grid-template-rows: minmax(0, 1fr) 27px;
   overflow: hidden;
@@ -750,6 +751,75 @@ input {
 
 .inspector-actions {
   margin-top: 14px;
+}
+
+.freeze-button {
+  color: #667085;
+}
+
+.freeze-button--active {
+  color: #0891b2 !important;
+}
+
+.track-row--frozen .track-controls {
+  background: #f2f8fd;
+}
+
+.track-row--frozen .track-lane {
+  background:
+    linear-gradient(180deg, rgba(186, 214, 245, .32), rgba(226, 238, 251, .14)),
+    #f5f9fe;
+}
+
+.audio-clip--frozen {
+  cursor: default;
+}
+
+.audio-clip--frozen::after {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(8, 145, 210, .07) 0 6px,
+    transparent 6px 12px
+  );
+  content: '';
+  pointer-events: none;
+}
+
+.freeze-alert {
+  position: absolute;
+  z-index: 12;
+  right: 12px;
+  bottom: 36px;
+  max-width: 430px;
+  box-shadow: 0 4px 14px rgba(16, 24, 40, .18);
+}
+
+.freeze-note {
+  margin-top: 13px;
+  font-size: 11px;
+}
+
+.freeze-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font-size: 10px;
+}
+
+.freeze-meta span {
+  color: #667085;
+}
+
+.freeze-meta b {
+  color: #344054;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-weight: 600;
+}
+
+.frozen-hint {
+  font-size: 11px;
 }
 
 .inspector-empty {

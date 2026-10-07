@@ -1,10 +1,12 @@
 import {
+  AcUnit,
   ContentCopy,
   DeleteOutline,
   GraphicEq,
   Tune,
 } from '@mui/icons-material';
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -28,6 +30,7 @@ export function ClipInspector() {
   const setClipEffect = useStudioStore((state) => state.setClipEffect);
   const duplicateClip = useStudioStore((state) => state.duplicateClip);
   const deleteClip = useStudioStore((state) => state.deleteClip);
+  const unfreezeTrack = useStudioStore((state) => state.unfreezeTrack);
 
   const selection = useMemo(() => {
     for (const track of project.tracks) {
@@ -54,6 +57,63 @@ export function ClipInspector() {
 
   const { track, clip } = selection;
   const asset = project.assets.find((item) => item.id === clip.assetId);
+
+  if (track.frozen) {
+    const frozen = track.frozen;
+    return (
+      <aside className="inspector-panel">
+        <div className="panel-heading">
+          <div>
+            <Typography variant="subtitle2">片段检查器</Typography>
+            <Typography variant="caption" color="text.secondary">{track.name}</Typography>
+          </div>
+          <Chip size="small" icon={<AcUnit />} label="已冻结" color="primary" />
+        </div>
+
+        <Box className="clip-summary" style={{ borderColor: track.color }}>
+          <span style={{ background: track.color }} />
+          <div>
+            <strong>{clip.name}</strong>
+            <small>冻结渲染 · {frozen.duration.toFixed(2)}s · 原 {frozen.source.clips.length} 个片段</small>
+          </div>
+        </Box>
+
+        <Alert severity="info" className="freeze-note">
+          音量、声像、淡入淡出与效果已渲染进这段音频。轨道内容只读，静音、独奏与音量仍可调整。
+        </Alert>
+
+        <div className="inspector-section">
+          <Typography className="section-label" variant="caption">冻结信息</Typography>
+          <div className="freeze-meta">
+            <span>渲染时间</span>
+            <b>{new Date(frozen.renderedAt).toLocaleString('zh-CN', { hour12: false })}</b>
+            <span>原始音量</span>
+            <b>{Math.round(frozen.source.volume * 100)}</b>
+            <span>原始声像</span>
+            <b>
+              {frozen.source.pan === 0
+                ? 'C'
+                : frozen.source.pan < 0
+                  ? `L${Math.round(Math.abs(frozen.source.pan) * 100)}`
+                  : `R${Math.round(frozen.source.pan * 100)}`}
+            </b>
+          </div>
+        </div>
+
+        <Divider />
+        <Stack direction="row" spacing={1} className="inspector-actions">
+          <Button
+            fullWidth
+            variant="contained"
+            startIcon={<AcUnit />}
+            onClick={() => unfreezeTrack(track.id)}
+          >
+            解冻轨道
+          </Button>
+        </Stack>
+      </aside>
+    );
+  }
 
   const update = (patch: Parameters<typeof setClip>[2]) => {
     setClip(track.id, clip.id, patch);

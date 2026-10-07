@@ -1,4 +1,5 @@
 import {
+  AcUnit,
   AudioFile,
   FiberManualRecord,
   FolderOpen,
@@ -30,6 +31,10 @@ import { SYNTHETIC_ASSETS } from '../utils/syntheticAudio';
 export function AssetLibrary() {
   const assets = useStudioStore((state) => state.project.assets);
   const selectedTrackId = useStudioStore((state) => state.selectedTrackId);
+  const selectedTrackFrozen = useStudioStore(
+    (state) =>
+      state.project.tracks.find((track) => track.id === state.selectedTrackId)?.frozen != null,
+  );
   const addClip = useStudioStore((state) => state.addClip);
   const importFile = useStudioStore((state) => state.importFile);
   const addRecordedBlob = useStudioStore((state) => state.addRecordedBlob);
@@ -77,7 +82,11 @@ export function AssetLibrary() {
       recorder.onstop = async () => {
         const duration = Math.max(0.2, (performance.now() - recordStartedAt.current) / 1000);
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        await addRecordedBlob(blob, duration);
+        try {
+          await addRecordedBlob(blob, duration);
+        } catch (nextError) {
+          setError(nextError instanceof Error ? nextError.message : '保存录音失败');
+        }
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
@@ -119,13 +128,16 @@ export function AssetLibrary() {
               添加为当前所选轨道的新片段
             </Typography>
           </div>
-          <Tooltip title={recording ? '停止录音' : '开始录音'}>
-            <IconButton
-              className={recording ? 'record-button record-button--active' : 'record-button'}
-              onClick={recording ? stopRecording : () => void startRecording()}
-            >
-              {recording ? <StopCircle /> : <FiberManualRecord />}
-            </IconButton>
+          <Tooltip title={recording ? '停止录音' : selectedTrackFrozen ? '当前轨道已冻结' : '开始录音'}>
+            <span>
+              <IconButton
+                className={recording ? 'record-button record-button--active' : 'record-button'}
+                disabled={!recording && selectedTrackFrozen}
+                onClick={recording ? stopRecording : () => void startRecording()}
+              >
+                {recording ? <StopCircle /> : <FiberManualRecord />}
+              </IconButton>
+            </span>
           </Tooltip>
         </Stack>
         {recording && (
@@ -134,6 +146,11 @@ export function AssetLibrary() {
             <strong>正在录音 {recordSeconds.toFixed(1)}s</strong>
             <small>输出到所选轨道</small>
           </div>
+        )}
+        {selectedTrackFrozen && !recording && (
+          <Alert severity="info" className="frozen-hint">
+            当前轨道已冻结，无法添加片段；解冻或切换轨道后可继续。
+          </Alert>
         )}
       </Stack>
 
@@ -144,10 +161,17 @@ export function AssetLibrary() {
           <ListItem
             key={asset.id}
             secondaryAction={
-              <Tooltip title="添加到当前轨道">
-                <IconButton edge="end" size="small" onClick={() => addClip(selectedTrackId, asset.id)}>
-                  <GraphicEq fontSize="small" />
-                </IconButton>
+              <Tooltip title={selectedTrackFrozen ? '当前轨道已冻结' : '添加到当前轨道'}>
+                <span>
+                  <IconButton
+                    edge="end"
+                    size="small"
+                    disabled={selectedTrackFrozen}
+                    onClick={() => addClip(selectedTrackId, asset.id)}
+                  >
+                    <GraphicEq fontSize="small" />
+                  </IconButton>
+                </span>
               </Tooltip>
             }
           >
@@ -170,19 +194,38 @@ export function AssetLibrary() {
             <ListItem
               key={asset.id}
               secondaryAction={
-                <Tooltip title="添加到当前轨道">
-                  <IconButton edge="end" size="small" onClick={() => addClip(selectedTrackId, asset.id)}>
-                    <GraphicEq fontSize="small" />
-                  </IconButton>
+                <Tooltip title={selectedTrackFrozen ? '当前轨道已冻结' : '添加到当前轨道'}>
+                  <span>
+                    <IconButton
+                      edge="end"
+                      size="small"
+                      disabled={selectedTrackFrozen}
+                      onClick={() => addClip(selectedTrackId, asset.id)}
+                    >
+                      <GraphicEq fontSize="small" />
+                    </IconButton>
+                  </span>
                 </Tooltip>
               }
             >
               <ListItemIcon>
-                {asset.source === 'recorded' ? <Mic color="error" /> : <AudioFile color="success" />}
+                {asset.source === 'recorded' ? (
+                  <Mic color="error" />
+                ) : asset.source === 'rendered' ? (
+                  <AcUnit color="primary" />
+                ) : (
+                  <AudioFile color="success" />
+                )}
               </ListItemIcon>
               <ListItemText
                 primary={asset.name}
-                secondary={`${asset.duration.toFixed(1)}s · ${asset.source === 'recorded' ? '浏览器录音' : '本地导入'}`}
+                secondary={`${asset.duration.toFixed(1)}s · ${
+                  asset.source === 'recorded'
+                    ? '浏览器录音'
+                    : asset.source === 'rendered'
+                      ? '冻结渲染'
+                      : '本地导入'
+                }`}
               />
             </ListItem>
           ))}
@@ -195,7 +238,7 @@ export function AssetLibrary() {
         fullWidth
         variant="outlined"
         startIcon={busy ? <CircularProgress size={15} /> : <FolderOpen />}
-        disabled={busy || recording}
+        disabled={busy || recording || selectedTrackFrozen}
         onClick={() => fileInputRef.current?.click()}
       >
         导入音频文件

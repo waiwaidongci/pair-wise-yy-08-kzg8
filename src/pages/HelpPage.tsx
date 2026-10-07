@@ -1,4 +1,4 @@
-import { ArrowBack, GraphicEq, Loop, Mic, Tune, Waves } from '@mui/icons-material';
+import { AcUnit, ArrowBack, GraphicEq, Loop, Mic, Tune, Waves } from '@mui/icons-material';
 import { Button, Card, CardContent, Stack, Typography } from '@mui/material';
 import { Link } from 'react-router-dom';
 
@@ -17,6 +17,11 @@ const TOPICS = [
     icon: <Tune />,
     title: '效果与混音',
     body: '每个片段支持淡入、淡出、低通、高通和 Echo。轨道提供音量、声像、静音和独奏控制。',
+  },
+  {
+    icon: <AcUnit />,
+    title: '轨道冻结',
+    body: '片段和效果叠满导致播放卡顿时，可把整轨渲染成一段音频。冻结后轨道只读，静音、独奏和音量仍可调，解冻可还原原片段与参数。',
   },
   {
     icon: <Loop />,

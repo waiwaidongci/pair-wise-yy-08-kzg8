@@ -1,4 +1,5 @@
 import {
+  AcUnit,
   ContentCopy,
   DeleteOutline,
   GraphicEq,
@@ -7,15 +8,17 @@ import {
   VolumeUp,
 } from '@mui/icons-material';
 import {
+  Alert,
   Box,
   Chip,
+  CircularProgress,
   IconButton,
   Slider,
   Stack,
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useStudioStore } from '../stores/studioStore';
 import type { AudioClip, AudioTrack } from '../types/audio';
 import { WaveformClip } from './WaveformClip';
@@ -45,9 +48,13 @@ export function TrackTimeline() {
   const selectClip = useStudioStore((state) => state.selectClip);
   const deleteClip = useStudioStore((state) => state.deleteClip);
   const duplicateClip = useStudioStore((state) => state.duplicateClip);
+  const freezeTrack = useStudioStore((state) => state.freezeTrack);
+  const unfreezeTrack = useStudioStore((state) => state.unfreezeTrack);
   const dragState = useRef<DragState | null>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [freezingTrackId, setFreezingTrackId] = useState<string | null>(null);
+  const [freezeError, setFreezeError] = useState<string | null>(null);
   const pps = project.pixelsPerSecond;
 
   const timelineDuration = useMemo(() => {
@@ -80,6 +87,22 @@ export function TrackTimeline() {
     return nearest;
   };
 
+  const toggleFreeze = async (track: AudioTrack) => {
+    setFreezeError(null);
+    if (track.frozen) {
+      unfreezeTrack(track.id);
+      return;
+    }
+    setFreezingTrackId(track.id);
+    try {
+      await freezeTrack(track.id);
+    } catch (error) {
+      setFreezeError(error instanceof Error ? error.message : '冻结轨道失败');
+    } finally {
+      setFreezingTrackId(null);
+    }
+  };
+
   const startDrag = (
     event: React.PointerEvent,
     track: AudioTrack,
@@ -89,6 +112,7 @@ export function TrackTimeline() {
     event.preventDefault();
     event.stopPropagation();
     selectClip(clip.id);
+    if (track.frozen) return; // 冻结轨道内容只读，不允许拖动或裁剪
     dragState.current = {
       mode,
       clip: { ...clip },
@@ -190,7 +214,7 @@ export function TrackTimeline() {
           >
             {project.tracks.map((track) => (
               <div
-                className={`track-row ${selectedTrackId === track.id ? 'track-row--selected' : ''}`}
+                className={`track-row ${selectedTrackId === track.id ? 'track-row--selected' : ''} ${track.frozen ? 'track-row--frozen' : ''}`}
                 key={track.id}
                 ref={(element) => {
                   rowRefs.current[track.id] = element;
@@ -221,6 +245,24 @@ export function TrackTimeline() {
                     >
                       S
                     </button>
+                    <Tooltip
+                      title={track.frozen ? '解冻轨道：还原片段与参数' : '冻结轨道：渲染为单段音频'}
+                    >
+                      <span>
+                        <IconButton
+                          size="small"
+                          className={track.frozen ? 'freeze-button freeze-button--active' : 'freeze-button'}
+                          disabled={freezingTrackId === track.id}
+                          onClick={() => void toggleFreeze(track)}
+                        >
+                          {freezingTrackId === track.id ? (
+                            <CircularProgress size={15} />
+                          ) : (
+                            <AcUnit fontSize="small" />
+                          )}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   </div>
                   <div className="track-mix-row">
                     <span>音量</span>
@@ -242,6 +284,7 @@ export function TrackTimeline() {
                       max={1}
                       step={0.01}
                       value={track.pan}
+                      disabled={Boolean(track.frozen)}
                       onChange={(_, value) => updateTrack(track.id, { pan: Number(value) })}
                     />
                     <span>{track.pan === 0 ? 'C' : track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`}</span>
@@ -265,10 +308,11 @@ export function TrackTimeline() {
                   {track.clips.map((clip) => {
                     const asset = project.assets.find((item) => item.id === clip.assetId);
                     const selected = selectedClipId === clip.id;
+                    const frozen = Boolean(track.frozen);
                     return (
                       <Box
                         key={clip.id}
-                        className={`audio-clip ${selected ? 'audio-clip--selected' : ''}`}
+                        className={`audio-clip ${selected ? 'audio-clip--selected' : ''} ${frozen ? 'audio-clip--frozen' : ''}`}
                         style={{
                           left: `${clip.start * pps}px`,
                           width: `${Math.max(20, clip.duration * pps)}px`,
@@ -279,7 +323,7 @@ export function TrackTimeline() {
                         onPointerDown={(event) => startDrag(event, track, clip, 'move')}
                       >
                         <div className="clip-title" title={clip.name}>
-                          <GraphicEq fontSize="inherit" />
+                          {frozen ? <AcUnit fontSize="inherit" /> : <GraphicEq fontSize="inherit" />}
                           <span>{clip.name}</span>
                           <small>{clip.duration.toFixed(2)}s</small>
                         </div>
@@ -291,17 +335,21 @@ export function TrackTimeline() {
                             color={track.color}
                           />
                         )}
-                        <span
-                          className="trim-handle trim-handle--left"
-                          title="裁剪片段左边缘"
-                          onPointerDown={(event) => startDrag(event, track, clip, 'trim-left')}
-                        />
-                        <span
-                          className="trim-handle trim-handle--right"
-                          title="裁剪片段右边缘"
-                          onPointerDown={(event) => startDrag(event, track, clip, 'trim-right')}
-                        />
-                        {selected && (
+                        {!frozen && (
+                          <span
+                            className="trim-handle trim-handle--left"
+                            title="裁剪片段左边缘"
+                            onPointerDown={(event) => startDrag(event, track, clip, 'trim-left')}
+                          />
+                        )}
+                        {!frozen && (
+                          <span
+                            className="trim-handle trim-handle--right"
+                            title="裁剪片段右边缘"
+                            onPointerDown={(event) => startDrag(event, track, clip, 'trim-right')}
+                          />
+                        )}
+                        {selected && !frozen && (
                           <span className="clip-actions" onPointerDown={(event) => event.stopPropagation()}>
                             <IconButton
                               size="small"
@@ -332,6 +380,11 @@ export function TrackTimeline() {
           </div>
         </div>
       </div>
+      {freezeError && (
+        <Alert severity="warning" className="freeze-alert" onClose={() => setFreezeError(null)}>
+          {freezeError}
+        </Alert>
+      )}
       <Stack className="timeline-footer" direction="row" spacing={2}>
         <span><Lock fontSize="inherit" /> 吸附步长 {project.snap.toFixed(2)}s</span>
         <span>时间轴 {project.pixelsPerSecond}px / 秒</span>
