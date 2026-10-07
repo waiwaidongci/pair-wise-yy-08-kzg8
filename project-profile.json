@@ -1,0 +1,11 @@
+{
+  "projectId": "pair-wise-yy-08",
+  "projectName": "WaveForge 多轨音频工作站",
+  "category": "音频编辑",
+  "businessDomain": "研发工具",
+  "projectForm": "完整项目",
+  "codeScope": "frontend",
+  "languages": "React, TypeScript, Web Audio API, Wavesurfer, MUI, Zustand, Vite",
+  "summary": "多轨音频编辑工作站，支持录音、导入、裁剪、音量声像、淡入淡出、效果器与工程保存。",
+  "containerized": false
+}
